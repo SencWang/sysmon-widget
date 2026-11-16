@@ -1,0 +1,98 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Type-check and build frontend
+        run: npm run build
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Build installers (branch / PR / manual)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: npm run tauri build -- --bundles nsis,msi
+
+      - name: Upload installers as workflow artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sysmon-widget-windows
+          path: |
+            src-tauri/target/release/sysmon-widget.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build bundles and create draft release (tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "sysmon-widget ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: --bundles nsis,msi
+          releaseBody: |
+            ## 中文
+
+            Windows 桌面监控贴片：本机 + `~/.ssh/config` 中的 Linux 主机，CPU / 内存 / NVIDIA GPU / Top10 进程；三种视图（贴片 / 详情 / 多机总览）。
+
+            - 主机列表自动同步 `~/.ssh/config`（只增不删，保留自定义名称与启用状态）
+            - tile 420×280，四台主机一行显示；字号与对比度可读性优化
+            - 多 GPU 卡片、每主机历史曲线、瞬时进程 CPU、单实例、开机自启、不透明度可调
+            - 26 个 Rust 单元测试通过
+
+            **安装**：下载下方 `sysmon-widget_*_x64-setup.exe`（NSIS）或 `.msi`。要求 Windows 10/11 x64 + WebView2；远程主机需 Linux/POSIX、密钥免密 SSH，可选 `nvidia-smi`。
+
+            ## English
+
+            Always-on-top Windows widget for local and SSH-reachable Linux hosts: CPU / memory / NVIDIA GPU / Top-10 processes in three views (tile, detail, multi-host grid).
+
+            - Host list auto-syncs from `~/.ssh/config` (append-only, keeps custom labels and disabled state)
+            - 420×280 tile shows every host in one row; larger fonts and higher contrast
+            - Multi-GPU cards, per-host history, instantaneous process CPU, single instance, autostart, opacity slider
+            - 26 Rust unit tests passing
+
+            **Install**: grab `sysmon-widget_*_x64-setup.exe` (NSIS) or `.msi` below. Requires Windows 10/11 x64 + WebView2; remote hosts need Linux/POSIX with key-based SSH, `nvidia-smi` optional.
+
+            Full changelog: `docs/release-notes/v0.2.1.md`.

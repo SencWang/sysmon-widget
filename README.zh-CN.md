@@ -1,5 +1,7 @@
 # sysmon-widget
 
+[![build](https://github.com/SencWang/sysmon-widget/actions/workflows/build.yml/badge.svg)](https://github.com/SencWang/sysmon-widget/actions/workflows/build.yml)
+
 [English](README.md) · **简体中文**
 
 一个常驻 Windows 桌面的无边框半透明贴片，在一屏内显示**本机**以及**所有可通过 SSH 连接的 Linux 主机**的 CPU / 内存 / NVIDIA GPU 占用和 Top10 进程。
@@ -54,7 +56,9 @@
 
 ## 安装 / 构建
 
-从 [Releases](https://github.com/SencWang/sysmon-widget/releases)（发布后）下载 NSIS 安装包或 MSI 直接安装。程序启动后驻留托盘：关闭窗口只是隐藏，点击托盘图标可重新显示。
+从 [Releases](https://github.com/SencWang/sysmon-widget/releases) 下载 NSIS 安装包或 MSI 直接安装。程序启动后驻留托盘：关闭窗口只是隐藏，点击托盘图标可重新显示。
+
+每次推送到 `main` 都会自动构建安装包并作为 workflow 产物提供（**Actions → build → `sysmon-widget-windows`**）；推送 `v0.2.1` 这类 tag 会构建同样的产物并生成一个草稿 Release。
 
 从源码构建（Node 20+、Rust stable + MSVC 工具链）：
 

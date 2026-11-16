@@ -1,5 +1,7 @@
 # sysmon-widget
 
+[![build](https://github.com/SencWang/sysmon-widget/actions/workflows/build.yml/badge.svg)](https://github.com/SencWang/sysmon-widget/actions/workflows/build.yml)
+
 **English** · [简体中文](README.zh-CN.md)
 
 A frameless, always-on-top desktop widget for Windows that shows **CPU / memory / NVIDIA GPU** usage and **Top-10 processes** of your local machine *and* of any Linux host reachable over SSH — on one small semi-transparent glass panel.
@@ -54,7 +56,9 @@ A frameless, always-on-top desktop widget for Windows that shows **CPU / memory 
 
 ## Install / build
 
-Download the NSIS installer or MSI from [Releases](https://github.com/SencWang/sysmon-widget/releases) (once published) and run it. The app starts in the tray; close the window to hide it, use the tray icon to bring it back.
+Download the NSIS installer or MSI from [Releases](https://github.com/SencWang/sysmon-widget/releases) and run it. The app starts in the tray; close the window to hide it, use the tray icon to bring it back.
+
+Every push to `main` builds installers as workflow artifacts (**Actions → build → `sysmon-widget-windows`**); pushing a tag like `v0.2.1` builds the same assets and opens a draft GitHub Release.
 
 From source (Node 20+, Rust stable with the MSVC toolchain):
 
