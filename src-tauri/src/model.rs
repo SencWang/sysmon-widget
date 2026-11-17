@@ -63,6 +63,12 @@ pub struct ProcessInfo {
     pub cpu: f64,
     /// 字节
     pub mem: u64,
+    /// 进程级 GPU 利用率 0-100；驱动/主机不支持时为 None（旧快照缺字段也按 None 处理）
+    #[serde(default)]
+    pub gpu_util: Option<f64>,
+    /// 进程级显存占用（字节）；驱动/主机不支持时为 None
+    #[serde(default)]
+    pub gpu_mem: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -76,6 +82,9 @@ pub struct Snapshot {
     pub gpus: Vec<GpuInfo>,
     pub processes: Vec<ProcessInfo>,
     pub error: Option<String>,
+    /// 本轮是否拿到了任意进程级 GPU 数据（WDDM 等不支持的环境为 false）
+    #[serde(default)]
+    pub gpu_proc_supported: bool,
 }
 
 /// 主机运行态：本机与远程统一结构，前端 grid/detail 共用。
@@ -216,14 +225,41 @@ mod tests {
                 name: "p".into(),
                 cpu: 1.0,
                 mem: 2,
+                gpu_util: None,
+                gpu_mem: None,
             }],
             error: None,
+            gpu_proc_supported: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains("\"perCore\""));
         assert!(json.contains("\"memUsed\""));
         assert!(json.contains("\"memTotal\""));
         assert!(json.contains("\"kind\":\"local\""));
+        assert!(json.contains("\"gpuUtil\""));
+        assert!(json.contains("\"gpuProcSupported\""));
+    }
+
+    #[test]
+    fn old_snapshot_without_gpu_fields_deserializes_as_none() {
+        // 0.2.1 及更早的历史快照/事件没有 gpuUtil / gpuMem / gpuProcSupported，
+        // 反序列化必须成功且按 None / false 处理（向后兼容）。
+        let old = r#"{
+            "host": {"id":"local","label":"本机","kind":"local"},
+            "ts": 1,
+            "cpu": {"usage": 10.0, "perCore": [10.0], "cores": 1},
+            "mem": {"used": 1, "total": 2},
+            "gpus": [],
+            "processes": [
+                {"pid": 7, "name": "python", "cpu": 3.5, "mem": 1024}
+            ],
+            "error": null
+        }"#;
+        let snap: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(snap.processes.len(), 1);
+        assert_eq!(snap.processes[0].gpu_util, None);
+        assert_eq!(snap.processes[0].gpu_mem, None);
+        assert!(!snap.gpu_proc_supported);
     }
 
     #[test]

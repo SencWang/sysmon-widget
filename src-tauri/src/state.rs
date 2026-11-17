@@ -242,6 +242,7 @@ mod tests {
             gpus: Vec::new(),
             processes: Vec::new(),
             error: None,
+            gpu_proc_supported: false,
         }
     }
 

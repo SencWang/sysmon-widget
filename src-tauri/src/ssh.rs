@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::collector::{hidden_command, parse_gpu_line};
+use crate::gpu_proc::{merge_gpu_procs, GpuProc};
 use crate::model::{GpuInfo, ProcessInfo, Snapshot};
 
 /// 连接超时（秒），与脚本超时配合。
@@ -32,6 +33,8 @@ echo "#STAT $stat2"
 echo "#MEM $memtotal $memavail"
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/#GPU /'
+  nvidia-smi pmon -c 1 2>/dev/null | grep -v '^#' | awk 'NF>3 {printf "#GPUPROC %s %s %s\n", $2, $4, $5}'
+  nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null | sed 's/^/#GPUMEM /'
 fi
 echo "$top_out" | awk '
   /^[[:space:]]*PID[[:space:]]/ { n++; next }
@@ -50,6 +53,8 @@ pub struct RemoteSample {
     pub mem_used: u64,
     pub gpus: Vec<GpuInfo>,
     pub processes: Vec<ProcessInfo>,
+    /// 远端是否提供任意进程级 GPU 数据（pmon 或 compute-apps）
+    pub gpu_proc_supported: bool,
 }
 
 /// ssh 配置里的一个别名（Host 行），hostname/user 由 `ssh -G` 补齐。
@@ -264,6 +269,8 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
     let mut mem_total_kb = 0u64;
     let mut mem_avail_kb = 0u64;
     let mut gpus: Vec<GpuInfo> = Vec::new();
+    let mut gpu_procs: Vec<GpuProc> = Vec::new();
+    let mut gpu_apps: Vec<(u32, u64)> = Vec::new();
     let mut raw_procs: Vec<(u32, f64, f64, String)> = Vec::new();
     let mut ended = false;
 
@@ -286,6 +293,42 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
         } else if let Some(rest) = line.strip_prefix("#GPU ") {
             if let Some(gpu) = parse_gpu_line(rest) {
                 gpus.push(gpu);
+            }
+        } else if let Some(rest) = line.strip_prefix("#GPUPROC ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let Ok(pid) = parts[0].parse::<u32>() else {
+                continue;
+            };
+            let metric = |text: &str| -> Option<f64> {
+                if text == "-" {
+                    None
+                } else {
+                    text.parse::<f64>().ok().map(|v| v.clamp(0.0, 100.0))
+                }
+            };
+            gpu_procs.push(GpuProc {
+                pid,
+                gpu: 0,
+                kind: String::new(),
+                sm: metric(parts[1]),
+                mem_pct: metric(parts[2]),
+                command: String::new(),
+            });
+        } else if let Some(rest) = line.strip_prefix("#GPUMEM ") {
+            let mut it = rest
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|value| !value.is_empty());
+            let (Some(pid), Some(mib)) = (
+                it.next().and_then(|v| v.trim().parse::<u32>().ok()),
+                it.next().and_then(|v| v.trim().parse::<f64>().ok()),
+            ) else {
+                continue;
+            };
+            if mib.is_finite() && mib >= 0.0 {
+                gpu_apps.push((pid, (mib * 1024.0 * 1024.0) as u64));
             }
         } else if let Some(rest) = line.strip_prefix("#PROC ") {
             let parts: Vec<&str> = rest.splitn(4, ' ').collect();
@@ -316,24 +359,37 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
         .saturating_sub(mem_avail_kb.min(mem_total_kb))
         .saturating_mul(1024);
 
-    let mut processes: Vec<ProcessInfo> = raw_procs
+    let processes: Vec<ProcessInfo> = raw_procs
         .into_iter()
         .map(|(pid, cpu, mem_pct, name)| ProcessInfo {
             pid,
             name,
             cpu: cpu.max(0.0),
             mem: (mem_pct.max(0.0) * mem_total_kb as f64 * 1024.0 / 100.0) as u64,
+            gpu_util: None,
+            gpu_mem: None,
         })
         .collect();
-    processes.sort_by(|a, b| {
-        b.cpu
-            .partial_cmp(&a.cpu)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.mem.cmp(&a.mem))
-    });
-    if top_n > 0 && processes.len() > top_n {
-        processes.truncate(top_n);
-    }
+    let gpu_total_bytes: Vec<u64> = gpus.iter().map(|gpu| gpu.mem_total).collect();
+    let mut merged = Snapshot {
+        host: crate::model::HostInfo::local(""),
+        ts: 0,
+        cpu: crate::model::CpuInfo::default(),
+        mem: crate::model::MemInfo::default(),
+        gpus: Vec::new(),
+        processes,
+        error: None,
+        gpu_proc_supported: false,
+    };
+    merge_gpu_procs(
+        &mut merged,
+        &gpu_procs,
+        &gpu_apps,
+        &gpu_total_bytes,
+        top_n.max(1),
+    );
+    let processes = merged.processes;
+    let gpu_proc_supported = merged.gpu_proc_supported;
 
     let cpu_usage = match (stats.first(), stats.get(1)) {
         (Some(a), Some(b)) => cpu_usage_from_stats(a, b),
@@ -347,6 +403,7 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
         mem_used,
         gpus,
         processes,
+        gpu_proc_supported,
     })
 }
 
@@ -367,6 +424,7 @@ pub fn sample_to_snapshot(host: crate::model::HostInfo, sample: RemoteSample) ->
         gpus: sample.gpus,
         processes: sample.processes,
         error: None,
+        gpu_proc_supported: sample.gpu_proc_supported,
     }
 }
 
@@ -512,13 +570,23 @@ pub fn debug_collect(alias: &str) -> (bool, String) {
             }
             for proc_ in &sample.processes {
                 lines.push(format!(
-                    "  PROC pid={} cpu={:.1}% mem={:.1} MiB name={}",
+                    "  PROC pid={} cpu={:.1}% mem={:.1} MiB gpu={} gpu_mem={} MiB name={}",
                     proc_.pid,
                     proc_.cpu,
                     proc_.mem as f64 / 1024.0 / 1024.0,
+                    proc_.gpu_util
+                        .map(|v| format!("{v:.0}%"))
+                        .unwrap_or_else(|| "--".into()),
+                    proc_.gpu_mem
+                        .map(|v| format!("{:.0}", v as f64 / 1024.0 / 1024.0))
+                        .unwrap_or_else(|| "--".into()),
                     proc_.name
                 ));
             }
+            lines.push(format!(
+                "  GPU_PROC_SUPPORTED={}",
+                sample.gpu_proc_supported
+            ));
             (true, lines.join("\n"))
         }
         Err(err) => (false, format!("[{alias}] OFFLINE: {err}")),
@@ -536,6 +604,10 @@ mod tests {
 #STAT cpu  8192027378 40199128 237281471 53197820430 2564304 0 442576 0 0 0
 #MEM 263876660 239894008
 #GPU 0, NVIDIA GeForce RTX 4090, 19, 9915, 24564, 51
+#GPUPROC 1450352 24 2
+#GPUPROC 7657 - -
+#GPUMEM 1450352, 8066
+#GPUMEM 999, 4096
 #PROC 1450352 5877 3.2 python
 #PROC 7657 25.0 0.4 gnome-shell
 #PROC 1450351 22.2 0.5 中文进程名 带空格
@@ -553,9 +625,17 @@ mod tests {
         assert_eq!(sample.mem_total, 263876660 * 1024);
         assert_eq!(sample.mem_used, (263876660 - 239894008) * 1024);
         // 坏行被跳过，中文进程名保留；top 的 %CPU 在多核机器上可远超 100
-        assert_eq!(sample.processes.len(), 4);
+        assert_eq!(sample.processes.len(), 5);
         assert_eq!(sample.processes[0].name, "python");
         assert!((sample.processes[0].cpu - 5877.0).abs() < f64::EPSILON);
+        // 进程级 GPU：pmon 的 SM% + compute-apps 的精确显存（MiB）
+        assert!(sample.gpu_proc_supported);
+        assert_eq!(sample.processes[0].gpu_util, Some(24.0));
+        assert_eq!(sample.processes[0].gpu_mem, Some(8066 * 1024 * 1024));
+        // GPU 显存大但 CPU 不在 Top N 的进程也会并入
+        let gpu_only = sample.processes.iter().find(|p| p.pid == 999).unwrap();
+        assert_eq!(gpu_only.cpu, 0.0);
+        assert_eq!(gpu_only.gpu_mem, Some(4096 * 1024 * 1024));
         assert_eq!(sample.processes[1].name, "gnome-shell");
         assert!((sample.processes[1].cpu - 25.0).abs() < f64::EPSILON);
         assert!(sample.processes.iter().any(|p| p.name == "中文进程名 带空格"));

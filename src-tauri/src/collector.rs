@@ -68,7 +68,7 @@ pub fn parse_nvidia_smi_csv(stdout: &str) -> Vec<GpuInfo> {
         .collect()
 }
 
-fn nvidia_smi_candidates() -> Vec<String> {
+pub(crate) fn nvidia_smi_candidates() -> Vec<String> {
     let mut list = vec!["nvidia-smi".to_string()];
     #[cfg(windows)]
     {
@@ -207,6 +207,7 @@ impl Collector {
                     .init_error
                     .clone()
                     .or_else(|| Some("采集器未初始化".to_string())),
+                gpu_proc_supported: false,
             };
         };
 
@@ -236,6 +237,8 @@ impl Collector {
                 name: proc_.name().to_string_lossy().to_string(),
                 cpu: proc_.cpu_usage() as f64,
                 mem: proc_.memory(),
+                gpu_util: None,
+                gpu_mem: None,
             })
             .collect();
         processes.sort_by(|a, b| {
@@ -253,7 +256,11 @@ impl Collector {
             errors.push(err);
         }
 
-        Snapshot {
+        // 进程级 GPU：pmon 失败时返回空列表，不影响上面的采集结果。
+        let (pmon, apps) = crate::gpu_proc::query_gpu_processes();
+        let gpu_total_bytes: Vec<u64> = gpus.iter().map(|gpu| gpu.mem_total).collect();
+
+        let mut snapshot = Snapshot {
             host: self.host.clone(),
             ts: crate::model::now_ms(),
             cpu,
@@ -265,7 +272,16 @@ impl Collector {
             } else {
                 Some(errors.join("；"))
             },
-        }
+            gpu_proc_supported: false,
+        };
+        crate::gpu_proc::merge_gpu_procs(
+            &mut snapshot,
+            &pmon,
+            &apps,
+            &gpu_total_bytes,
+            top_n.max(1),
+        );
+        snapshot
     }
 }
 
@@ -354,6 +370,7 @@ garbage line
             }],
             processes: vec![],
             error: None,
+            gpu_proc_supported: false,
         });
         let hist = build_history(&queue);
         assert_eq!(hist.ts, vec![1000]);

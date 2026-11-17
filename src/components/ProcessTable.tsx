@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { clamp, gib, shortName } from "../lib/format";
 import { COLORS, type ProcessInfo, type SortKey } from "../types";
 
@@ -9,18 +9,61 @@ type Props = {
   memTotal: number;
   /** 可选说明（远程主机标注采样口径） */
   note?: string;
+  /** 本轮是否拿到进程级 GPU 数据；false 时在表下给出驱动限制说明 */
+  gpuProcSupported?: boolean;
+  /** 最多显示行数（默认 10；由 max(topN, 10) 决定） */
+  limit?: number;
 };
 
-/** Top10 进程表：点击表头切换 CPU/内存排序，排序状态由上层保存 */
-export function ProcessTable({ processes, sortKey, onSort, memTotal, note }: Props) {
+const NO_GPU_TITLE = "该主机或驱动未提供进程级 GPU 数据";
+
+function sortValue(process: ProcessInfo, key: SortKey): number | null {
+  if (key === "cpu") return process.cpu;
+  if (key === "mem") return process.mem;
+  if (key === "gpu") return process.gpuUtil ?? null;
+  return process.gpuMem ?? null;
+}
+
+/** Top10 进程表：点击表头在 CPU / 内存 / GPU% / GPU 显存之间切换排序 */
+export function ProcessTable({
+  processes,
+  sortKey,
+  onSort,
+  memTotal,
+  note,
+  gpuProcSupported,
+}: Props) {
+  const [descending, setDescending] = useState(true);
+
   const rows = useMemo(() => {
     const copy = [...processes];
-    copy.sort((a, b) => (sortKey === "cpu" ? b.cpu - a.cpu : b.mem - a.mem));
+    copy.sort((a, b) => {
+      const left = sortValue(a, sortKey);
+      const right = sortValue(b, sortKey);
+      // 缺少 GPU 数据的行无论升降序都排在最后。
+      if (left == null && right == null) return 0;
+      if (left == null) return 1;
+      if (right == null) return -1;
+      return descending ? right - left : left - right;
+    });
     return copy.slice(0, 10);
-  }, [processes, sortKey]);
+  }, [processes, sortKey, descending]);
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setDescending((value) => !value);
+    } else {
+      onSort(key);
+      setDescending(true);
+    }
+  };
+
+  const arrow = (key: SortKey) =>
+    sortKey === key ? (descending ? " ▼" : " ▲") : "";
 
   const maxCpu = Math.max(100, ...rows.map((r) => r.cpu));
   const memBase = memTotal > 0 ? memTotal : Math.max(1, ...rows.map((r) => r.mem));
+  const gpuMemBase = Math.max(1, ...rows.map((r) => r.gpuMem ?? 0));
 
   return (
     <div className="proc-panel">
@@ -33,17 +76,31 @@ export function ProcessTable({ processes, sortKey, onSort, memTotal, note }: Pro
               <th className="col-name">进程</th>
               <th
                 className={`col-num sortable ${sortKey === "cpu" ? "active" : ""}`}
-                onClick={() => onSort("cpu")}
+                onClick={() => handleSort("cpu")}
                 title="按 CPU 排序"
               >
-                CPU {sortKey === "cpu" ? "▼" : ""}
+                CPU{arrow("cpu")}
               </th>
               <th
                 className={`col-num sortable ${sortKey === "mem" ? "active" : ""}`}
-                onClick={() => onSort("mem")}
+                onClick={() => handleSort("mem")}
                 title="按内存排序"
               >
-                内存 {sortKey === "mem" ? "▼" : ""}
+                内存{arrow("mem")}
+              </th>
+              <th
+                className={`col-gpu sortable ${sortKey === "gpu" ? "active" : ""}`}
+                onClick={() => handleSort("gpu")}
+                title="nvidia-smi pmon SM 利用率 / compute-apps 显存"
+              >
+                GPU%{arrow("gpu")}
+              </th>
+              <th
+                className={`col-gpu sortable ${sortKey === "gpuMem" ? "active" : ""}`}
+                onClick={() => handleSort("gpuMem")}
+                title="按进程显存（nvidia-smi compute-apps）排序"
+              >
+                GPU 显存{arrow("gpuMem")}
               </th>
             </tr>
           </thead>
@@ -82,11 +139,51 @@ export function ProcessTable({ processes, sortKey, onSort, memTotal, note }: Pro
                     </div>
                   </div>
                 </td>
+                <td className="col-gpu">
+                  {p.gpuUtil == null ? (
+                    <span className="dim" title={NO_GPU_TITLE}>
+                      —
+                    </span>
+                  ) : (
+                    <div className="cell">
+                      <span className="mono">{Math.round(p.gpuUtil)}%</span>
+                      <div className="mini-track">
+                        <div
+                          className="mini-fill"
+                          style={{
+                            width: `${clamp(p.gpuUtil, 1, 100)}%`,
+                            background: COLORS.gpu,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </td>
+                <td className="col-gpu">
+                  {p.gpuMem == null ? (
+                    <span className="dim" title={NO_GPU_TITLE}>
+                      —
+                    </span>
+                  ) : (
+                    <div className="cell">
+                      <span className="mono">{gib(p.gpuMem)} GiB</span>
+                      <div className="mini-track">
+                        <div
+                          className="mini-fill"
+                          style={{
+                            width: `${clamp((p.gpuMem / gpuMemBase) * 100, 1, 100)}%`,
+                            background: COLORS.gpu,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </td>
               </tr>
             ))}
             {rows.length === 0 ? (
               <tr>
-                <td className="empty dim" colSpan={4}>
+                <td className="empty dim" colSpan={6}>
                   暂未采集到进程数据
                 </td>
               </tr>
@@ -94,6 +191,11 @@ export function ProcessTable({ processes, sortKey, onSort, memTotal, note }: Pro
           </tbody>
         </table>
       </div>
+      {gpuProcSupported === false ? (
+        <div className="proc-gpu-note dim">
+          当前主机/驱动不支持按进程统计 GPU（Windows WDDM 常见）
+        </div>
+      ) : null}
     </div>
   );
 }

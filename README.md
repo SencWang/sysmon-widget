@@ -16,10 +16,10 @@ A frameless, always-on-top desktop widget for Windows that shows **CPU / memory 
 
 - **Three views, one window**
   - `tile` (420×280): rings for CPU/GPU, bars for RAM/VRAM, 60-second sparkline, plus a host strip showing every machine's `CPU%/GPU%` at a glance.
-  - `detail` (900×620): history charts for CPU, memory, GPU and VRAM, one card per GPU (utilization / VRAM / temperature), sortable Top-10 process table.
+  - `detail` (900×620): history charts for CPU, memory, GPU and VRAM, one card per GPU (utilization / VRAM / temperature), sortable Top-10 process table with per-process **GPU% / GPU memory** columns.
   - `grid` (780×520): one card per host with online dot, SSH latency, four usage bars, and last-update time.
-- **Local collection** via [`sysinfo`](https://crates.io/crates/sysinfo) and `nvidia-smi` (spawned without a console window).
-- **Remote collection over SSH** with a *single* round trip per host: a small POSIX shell script is piped into `ssh <alias> sh -s` and emits self-describing `#CORES / #STAT / #MEM / #GPU / #PROC / #END` records. 8-second timeout, exponential backoff, per-host threads, no UI blocking.
+- **Local collection** via [`sysinfo`](https://crates.io/crates/sysinfo) and `nvidia-smi` (spawned without a console window), including per-process GPU via `nvidia-smi pmon` and `--query-compute-apps`.
+- **Remote collection over SSH** with a *single* round trip per host: a small POSIX shell script is piped into `ssh <alias> sh -s` and emits self-describing `#CORES / #STAT / #MEM / #GPU / #GPUPROC / #GPUMEM / #PROC / #END` records. 8-second timeout, exponential backoff, per-host threads, no UI blocking.
 - **Host list auto-syncs from `~/.ssh/config`**: missing `Host` aliases are appended on startup / config reload / manual sync. Existing entries keep their custom label and enabled state; nothing is ever deleted.
 - **Instantaneous process CPU** for remote hosts (second sample of `top -bn2`), so a busy python process shows its real current usage rather than a lifetime average.
 - **Desktop ergonomics**: frameless and draggable, always-on-top, dark glass styling, tray menu (show/hide, always-on-top, reload config, open config, quit), single instance, optional launch at login, adjustable opacity.
@@ -45,12 +45,24 @@ A frameless, always-on-top desktop widget for Windows that shows **CPU / memory 
 
 - Local sampling and remote sampling run on independent threads; a dead host never stalls the widget.
 - GPU is optional everywhere: if `nvidia-smi` is missing, GPU cards show a placeholder instead of an error.
+- Per-process GPU records (`#GPUPROC` / `#GPUMEM`) travel in the same SSH round trip; the remote script sends only `pid SM% mem%` and `pid used_MiB`, so drivers with different `pmon` column layouts still work.
 - History lives in memory (default 180 points ≈ 6 min at a 2 s interval) and resets on restart.
+
+## Per-process GPU
+
+The `detail` process table has two extra columns, **GPU%** and **GPU memory**:
+
+- **Data source** — both the local machine and every SSH host run `nvidia-smi pmon -c 1` (SM utilization of the process) and `nvidia-smi --query-compute-apps=pid,used_memory` (exact used VRAM, MiB). Records are merged by PID. VRAM from `compute-apps` wins; when it is unavailable, `pmon`'s `mem` percentage × the card's total VRAM is used as an estimate.
+- **Candidate rows** — the table is the union of the Top-N processes by CPU and the Top-N processes by GPU memory (deduplicated). A process that uses a lot of VRAM but little CPU therefore still appears, and the final list is capped at `max(topN, 10)` rows.
+- **Sorting** — click `CPU`, `内存` (memory), `GPU%` or `GPU 显存` (GPU memory) to sort ascending/descending. Missing values are rendered as `—` with an explanatory tooltip.
+- **Limitations** — NVIDIA only. Windows WDDM does not support per-process GPU accounting: `nvidia-smi pmon` fails and `compute-apps` is empty, so the GPU columns show `—` and the table displays a note under it. The same note appears when a remote host has no usable `nvidia-smi`. MIG / vGPU / container setups may report PIDs that do not match a visible process; those rows keep the PID as their name. `pmon` column layouts vary between drivers, so columns are located by header name rather than fixed positions.
+
+![detail with GPU columns](docs/screenshots/detail.png)
 
 ## Requirements
 
 - Windows 10/11 x64, WebView2 runtime (bundled with Windows 11 and current Windows 10).
-- NVIDIA GPU + `nvidia-smi` for GPU metrics (optional).
+- NVIDIA GPU + `nvidia-smi` for GPU metrics (optional). Per-process GPU requires a driver that supports `nvidia-smi pmon` / `--query-compute-apps`; Windows WDDM does not.
 - OpenSSH client for remote hosts, with **key-based** authentication (`BatchMode=yes`). Password prompts are intentionally unsupported.
 - Remote hosts must be POSIX/Linux and provide `/proc`, `top -w`, and optionally `nvidia-smi`.
 
@@ -58,7 +70,7 @@ A frameless, always-on-top desktop widget for Windows that shows **CPU / memory 
 
 Download the NSIS installer or MSI from [Releases](https://github.com/SencWang/sysmon-widget/releases) and run it. The app starts in the tray; close the window to hide it, use the tray icon to bring it back.
 
-Every push to `main` builds installers as workflow artifacts (**Actions → build → `sysmon-widget-windows`**); pushing a tag like `v0.2.1` builds the same assets and opens a draft GitHub Release.
+Every push to `main` builds installers as workflow artifacts (**Actions → build → `sysmon-widget-windows`**); pushing a tag like `v0.2.2` builds the same assets and opens a draft GitHub Release.
 
 From source (Node 20+, Rust stable with the MSVC toolchain):
 
@@ -101,7 +113,7 @@ Only *missing* aliases are added; disabling or renaming a host in the settings p
 | --- | --- | --- |
 | `refreshMs` | `2000` | local refresh interval; remote hosts use `max(refreshMs, 3000)` |
 | `historyPoints` | `180` | history samples kept per host |
-| `topN` | `10` | processes per host |
+| `topN` | `10` | candidate processes per host: Top-N by CPU plus Top-N by GPU memory (table shows at most `max(topN, 10)` rows) |
 | `opacity` | `0.92` | panel opacity multiplier (0.6–1.0) |
 | `alwaysOnTop` | `true` | keep the widget above other windows |
 | `autostart` | `false` | launch at login (HKCU `Run` key, no admin rights) |
@@ -116,6 +128,7 @@ Tray menu: **Show/Hide**, **Always on top**, **Reload config**, **Open config fi
 
 - Remote hosts must be Linux/POSIX; Windows remotes are not supported yet.
 - GPU support is NVIDIA-only (`nvidia-smi`); AMD/Intel GPUs show no data.
+- Per-process GPU data is unavailable on Windows WDDM (GPU columns show `—` and a note); it also needs a driver and a non-MIG setup where `pmon` / `--query-compute-apps` report usable PIDs.
 - Password / keyboard-interactive SSH authentication is not implemented by design.
 - History is in-memory only; there is no long-term storage or alerting.
 - Built and tested on Windows 11 with WebView2 157; other Windows versions should work but are untested.

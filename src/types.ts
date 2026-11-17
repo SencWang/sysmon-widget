@@ -1,7 +1,7 @@
 // 与 Rust 后端一致的数据模型（serde rename_all = camelCase）
 export type ViewName = "tile" | "detail" | "grid";
 export type Level = "normal" | "warn" | "danger";
-export type SortKey = "cpu" | "mem";
+export type SortKey = "cpu" | "mem" | "gpu" | "gpuMem";
 
 export type HostInfo = {
   id: string;
@@ -40,6 +40,10 @@ export type ProcessInfo = {
   cpu: number;
   /** bytes */
   mem: number;
+  /** 进程级 GPU 利用率 0-100；主机/驱动不支持时为 null */
+  gpuUtil?: number | null;
+  /** 进程级显存（bytes）；主机/驱动不支持时为 null */
+  gpuMem?: number | null;
 };
 
 export type Snapshot = {
@@ -51,6 +55,8 @@ export type Snapshot = {
   gpus: GpuInfo[];
   processes: ProcessInfo[];
   error: string | null;
+  /** 本轮是否拿到任意进程级 GPU 数据（WDDM 等为 false） */
+  gpuProcSupported?: boolean;
 };
 
 export type ServerConfig = {

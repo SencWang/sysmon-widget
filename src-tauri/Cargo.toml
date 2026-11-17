@@ -1,6 +1,6 @@
 [package]
 name = "sysmon-widget"
-version = "0.2.1"
+version = "0.2.2"
 description = "Windows 桌面系统监控贴片（CPU/内存/GPU/Top10 进程）"
 authors = ["scWang"]
 edition = "2024"

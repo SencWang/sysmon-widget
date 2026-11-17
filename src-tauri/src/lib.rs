@@ -3,6 +3,7 @@ mod autostart;
 mod collector;
 mod commands;
 mod config;
+mod gpu_proc;
 mod model;
 mod ssh;
 mod state;

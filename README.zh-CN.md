@@ -16,10 +16,10 @@
 
 - **一个窗口，三种视图**
   - `tile`（420×280）：CPU / GPU 环形进度、内存 / 显存横条、60 秒迷你曲线；底部主机选择条直接显示每台机器的 `CPU%/GPU%`。
-  - `detail`（900×620）：CPU、内存、GPU / 显存历史曲线，每块 GPU 一张小卡（利用率 / 显存 / 温度），可排序的 Top10 进程表。
+  - `detail`（900×620）：CPU、内存、GPU / 显存历史曲线，每块 GPU 一张小卡（利用率 / 显存 / 温度），可排序的 Top10 进程表，新增**进程级 GPU% / GPU 显存**两列。
   - `grid`（780×520）：每台主机一张卡片，含在线状态点、SSH 延迟、四条占用条与最近更新时间。
-- **本机采集**：`sysinfo` 取 CPU / 内存 / 进程，`nvidia-smi` 取 GPU（CREATE_NO_WINDOW，不闪黑框）。
-- **SSH 远程采集**：每台主机**一次 SSH 往返**。把一段 POSIX shell 脚本写入 `ssh <alias> sh -s` 的标准输入，远端输出 `#CORES / #STAT / #MEM / #GPU / #PROC / #END` 自描述记录；8 秒整体超时、失败指数退避、每台主机独立线程，互不阻塞，也不卡界面。
+- **本机采集**：`sysinfo` 取 CPU / 内存 / 进程，`nvidia-smi` 取 GPU（CREATE_NO_WINDOW，不闪黑框），并用 `nvidia-smi pmon` 与 `--query-compute-apps` 采集每个进程的 GPU 占用。
+- **SSH 远程采集**：每台主机**一次 SSH 往返**。把一段 POSIX shell 脚本写入 `ssh <alias> sh -s` 的标准输入，远端输出 `#CORES / #STAT / #MEM / #GPU / #GPUPROC / #GPUMEM / #PROC / #END` 自描述记录；8 秒整体超时、失败指数退避、每台主机独立线程，互不阻塞，也不卡界面。
 - **主机列表自动同步 `~/.ssh/config`**：启动时、重载配置时、或手动点「同步 SSH 别名」时，把缺失的 `Host` 别名自动追加；已有主机保留自定义显示名与启用状态，**只增不删**。
 - **远程进程 CPU 是瞬时值**（`top -bn2` 第二段），不是进程启动以来的平均值；多核机器上可以超过 100%。
 - **桌面体验**：无边框可拖动、置顶、深色毛玻璃、托盘菜单（显示/隐藏、置顶、重新加载配置、打开配置、退出）、单实例、可选开机自启、不透明度可调。
@@ -45,12 +45,24 @@
 
 - 本机采样与远程采样是彼此独立的线程，某台机器掉线不会影响其他主机或界面刷新。
 - GPU 是可选项：没有 `nvidia-smi` 时显示占位，而不是报错弹窗。
+- 进程级 GPU 记录（`#GPUPROC` / `#GPUMEM`）随同一次 SSH 往返返回；远端脚本只发送 `pid SM% mem%` 与 `pid used_MiB`，以兼容不同驱动的 `pmon` 列布局。
 - 历史数据只存在内存里（默认 180 点，2 秒间隔约 6 分钟），重启后重新累积。
+
+## 进程级 GPU
+
+`detail` 进程表新增 **GPU%** 与 **GPU 显存** 两列：
+
+- **数据来源**：本机与每台 SSH 主机都会执行 `nvidia-smi pmon -c 1`（进程 SM 利用率）和 `nvidia-smi --query-compute-apps=pid,used_memory`（精确显存，MiB），再按 PID 合并。显存优先采用 `compute-apps` 的精确值；缺失时退回 `pmon` 的 `mem` 百分比 × 整卡显存估算。
+- **候选进程**：表格是「CPU 前 N」与「GPU 显存前 N」的并集（按 PID 去重）。因此显存占用大但 CPU 不高的进程也会出现；最终行数上限为 `max(topN, 10)`。
+- **排序**：点击 `CPU`、`内存`、`GPU%`、`GPU 显存` 表头即可升/降序切换；缺失值显示 `—`，悬停有说明。
+- **受限条件**：仅支持 NVIDIA。Windows WDDM 不支持按进程统计 GPU，`nvidia-smi pmon` 会直接失败、`compute-apps` 为空，此时两列显示 `—`，表格下方给出一行说明；远程主机没有可用的 `nvidia-smi` 时同样如此。MIG / vGPU / 容器环境可能返回与本机进程列表对不上的 PID，这类行以 PID 作为进程名。不同驱动的 `pmon` 列数不同，解析时按表头定位 `sm` / `mem`，不依赖固定列数。
+
+![带 GPU 列的 detail](docs/screenshots/detail.png)
 
 ## 环境要求
 
 - Windows 10/11 x64，WebView2 运行时（Windows 11 与较新的 Windows 10 自带）。
-- 需要 GPU 指标时：NVIDIA 显卡 + `nvidia-smi`（可选）。
+- 需要 GPU 指标时：NVIDIA 显卡 + `nvidia-smi`（可选）。进程级 GPU 还要求驱动支持 `nvidia-smi pmon` / `--query-compute-apps`；Windows WDDM 不支持。
 - 远程主机需要 OpenSSH 客户端，并使用**密钥认证**（程序固定 `BatchMode=yes`，不会弹密码框）。
 - 远程主机需为 POSIX/Linux，提供 `/proc`、`top -w`，可选 `nvidia-smi`。
 
@@ -58,7 +70,7 @@
 
 从 [Releases](https://github.com/SencWang/sysmon-widget/releases) 下载 NSIS 安装包或 MSI 直接安装。程序启动后驻留托盘：关闭窗口只是隐藏，点击托盘图标可重新显示。
 
-每次推送到 `main` 都会自动构建安装包并作为 workflow 产物提供（**Actions → build → `sysmon-widget-windows`**）；推送 `v0.2.1` 这类 tag 会构建同样的产物并生成一个草稿 Release。
+每次推送到 `main` 都会自动构建安装包并作为 workflow 产物提供（**Actions → build → `sysmon-widget-windows`**）；推送 `v0.2.2` 这类 tag 会构建同样的产物并生成一个草稿 Release。
 
 从源码构建（Node 20+、Rust stable + MSVC 工具链）：
 
@@ -101,7 +113,7 @@ cd src-tauri; cargo test
 | --- | --- | --- |
 | `refreshMs` | `2000` | 本机刷新间隔；远程主机实际使用 `max(refreshMs, 3000)` |
 | `historyPoints` | `180` | 每台主机保留的历史点数 |
-| `topN` | `10` | 每台主机显示的进程数 |
+| `topN` | `10` | 每台主机的候选进程数：CPU 前 N + GPU 显存前 N（表格最多显示 `max(topN, 10)` 行） |
 | `opacity` | `0.92` | 面板不透明度系数（0.6–1.0） |
 | `alwaysOnTop` | `true` | 是否置顶 |
 | `autostart` | `false` | 开机自启（写 HKCU `Run`，无需管理员权限） |
@@ -116,6 +128,7 @@ cd src-tauri; cargo test
 
 - 远程主机仅支持 Linux/POSIX，暂不支持 Windows 远程。
 - GPU 仅支持 NVIDIA（依赖 `nvidia-smi`），AMD/Intel 显卡不显示数据。
+- 进程级 GPU 在 Windows WDDM 下不可用（两列显示 `—` 并给出提示）；还要求驱动与非 MIG 环境能通过 `pmon` / `--query-compute-apps` 返回可用的 PID。
 - 不支持密码 / 键盘交互式 SSH 认证（有意为之）。
 - 历史数据只在内存中，没有持久化存储与告警功能。
 - 开发与验证环境为 Windows 11 + WebView2 157，其他 Windows 版本未实测。
