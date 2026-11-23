@@ -44,6 +44,8 @@ export type ProcessInfo = {
   gpuUtil?: number | null;
   /** 进程级显存（bytes）；主机/驱动不支持时为 null */
   gpuMem?: number | null;
+  /** 完整命令行（最长 300 字符）；旧快照或采集失败时为 null/缺省 */
+  cmd?: string | null;
 };
 
 export type Snapshot = {

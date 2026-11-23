@@ -256,6 +256,7 @@ pub fn merge_gpu_procs(
             mem: 0,
             gpu_util: usage.and_then(|item| item.sm),
             gpu_mem: Some(bytes),
+            cmd: None,
         });
     }
 
@@ -351,6 +352,7 @@ mod tests {
             mem: 0,
             gpu_util: None,
             gpu_mem: None,
+            cmd: None,
         }
     }
 

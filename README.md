@@ -19,7 +19,7 @@ A frameless, always-on-top desktop widget for Windows that shows **CPU / memory 
   - `detail` (900×620): history charts for CPU, memory, GPU and VRAM, one card per GPU (utilization / VRAM / temperature), sortable Top-10 process table with per-process **GPU% / GPU memory** columns.
   - `grid` (780×520): one card per host with online dot, SSH latency, four usage bars, and last-update time.
 - **Local collection** via [`sysinfo`](https://crates.io/crates/sysinfo) and `nvidia-smi` (spawned without a console window), including per-process GPU via `nvidia-smi pmon` and `--query-compute-apps`.
-- **Remote collection over SSH** with a *single* round trip per host: a small POSIX shell script is piped into `ssh <alias> sh -s` and emits self-describing `#CORES / #STAT / #MEM / #GPU / #GPUPROC / #GPUMEM / #PROC / #END` records. 8-second timeout, exponential backoff, per-host threads, no UI blocking.
+- **Remote collection over SSH** with a *single* round trip per host: a small POSIX shell script is piped into `ssh <alias> sh -s` and emits self-describing `#CORES / #STAT / #MEM / #GPU / #GPUPROC / #GPUMEM / #PROC / #PROCCMD / #END` records. 8-second timeout, exponential backoff, per-host threads, no UI blocking.
 - **Host list auto-syncs from `~/.ssh/config`**: missing `Host` aliases are appended on startup / config reload / manual sync. Existing entries keep their custom label and enabled state; nothing is ever deleted.
 - **Instantaneous process CPU** for remote hosts (second sample of `top -bn2`), so a busy python process shows its real current usage rather than a lifetime average.
 - **Desktop ergonomics**: frameless and draggable, always-on-top, dark glass styling, tray menu (show/hide, always-on-top, reload config, open config, quit), single instance, optional launch at login, adjustable opacity.
@@ -59,6 +59,17 @@ The `detail` process table has two extra columns, **GPU%** and **GPU memory**:
 
 ![detail with GPU columns](docs/screenshots/detail.png)
 
+## Telling same-named processes apart
+
+The process table appends a small grey `· <script>` tag to the process name; hovering the row's name cell shows the full command line.
+
+- **Local hosts** — the command line comes from `sysinfo`'s `Process::cmd()` (all arguments joined with spaces).
+- **SSH hosts** — `/proc/<pid>/cmdline` is read inside the *existing* single round trip, for the union of the Top-20-by-CPU PIDs and the PIDs reported by `nvidia-smi pmon` / `--query-compute-apps`. No extra SSH connection is opened, and PIDs that were only added because of their GPU memory still get their tag.
+- **Tag rule** — `argv[0]` (the interpreter or executable) and options starting with `-` are skipped, then the first remaining argument's file name is shown: `python -u /data/wsc/train_isaac.py --cfg x` → `python · train_isaac.py`. For `python -c ...` the first 24 characters of the code are shown. If no usable argument remains (for example a kernel thread with no cmdline), only the process name is shown.
+- **Limits** — command lines are capped at 300 characters. A missing or unreadable `/proc/<pid>/cmdline` just omits the tag; it never fails the sample or the row.
+
+![detail with process tags](docs/screenshots/detail.png)
+
 ## Requirements
 
 - Windows 10/11 x64, WebView2 runtime (bundled with Windows 11 and current Windows 10).
@@ -70,7 +81,7 @@ The `detail` process table has two extra columns, **GPU%** and **GPU memory**:
 
 Download the NSIS installer or MSI from [Releases](https://github.com/SencWang/sysmon-widget/releases) and run it. The app starts in the tray; close the window to hide it, use the tray icon to bring it back.
 
-Every push to `main` builds installers as workflow artifacts (**Actions → build → `sysmon-widget-windows`**); pushing a tag like `v0.2.2` builds the same assets and opens a draft GitHub Release.
+Every push to `main` builds installers as workflow artifacts (**Actions → build → `sysmon-widget-windows`**); pushing a tag like `v0.2.3` builds the same assets and opens a draft GitHub Release.
 
 From source (Node 20+, Rust stable with the MSVC toolchain):
 

@@ -19,7 +19,7 @@
   - `detail`（900×620）：CPU、内存、GPU / 显存历史曲线，每块 GPU 一张小卡（利用率 / 显存 / 温度），可排序的 Top10 进程表，新增**进程级 GPU% / GPU 显存**两列。
   - `grid`（780×520）：每台主机一张卡片，含在线状态点、SSH 延迟、四条占用条与最近更新时间。
 - **本机采集**：`sysinfo` 取 CPU / 内存 / 进程，`nvidia-smi` 取 GPU（CREATE_NO_WINDOW，不闪黑框），并用 `nvidia-smi pmon` 与 `--query-compute-apps` 采集每个进程的 GPU 占用。
-- **SSH 远程采集**：每台主机**一次 SSH 往返**。把一段 POSIX shell 脚本写入 `ssh <alias> sh -s` 的标准输入，远端输出 `#CORES / #STAT / #MEM / #GPU / #GPUPROC / #GPUMEM / #PROC / #END` 自描述记录；8 秒整体超时、失败指数退避、每台主机独立线程，互不阻塞，也不卡界面。
+- **SSH 远程采集**：每台主机**一次 SSH 往返**。把一段 POSIX shell 脚本写入 `ssh <alias> sh -s` 的标准输入，远端输出 `#CORES / #STAT / #MEM / #GPU / #GPUPROC / #GPUMEM / #PROC / #PROCCMD / #END` 自描述记录；8 秒整体超时、失败指数退避、每台主机独立线程，互不阻塞，也不卡界面。
 - **主机列表自动同步 `~/.ssh/config`**：启动时、重载配置时、或手动点「同步 SSH 别名」时，把缺失的 `Host` 别名自动追加；已有主机保留自定义显示名与启用状态，**只增不删**。
 - **远程进程 CPU 是瞬时值**（`top -bn2` 第二段），不是进程启动以来的平均值；多核机器上可以超过 100%。
 - **桌面体验**：无边框可拖动、置顶、深色毛玻璃、托盘菜单（显示/隐藏、置顶、重新加载配置、打开配置、退出）、单实例、可选开机自启、不透明度可调。
@@ -59,6 +59,17 @@
 
 ![带 GPU 列的 detail](docs/screenshots/detail.png)
 
+## 同名进程如何区分
+
+进程表的进程名后面会追加一行小号灰字 `· <脚本>`，鼠标悬停在名称单元格上显示完整命令行。
+
+- **本机**：命令行来自 `sysinfo` 的 `Process::cmd()`（所有参数用空格拼接），采集失败或没有参数时不显示标签。
+- **SSH 主机**：在**原有的单次往返**里，对「CPU 前 20」与 `nvidia-smi pmon` / `--query-compute-apps` 出现的 PID 取并集，逐个读取 `/proc/<pid>/cmdline`，不额外建立 SSH 连接；只因显存占用大才被补进表格的进程同样能拿到标签。
+- **短标签规则**：跳过 `argv[0]`（解释器/可执行文件本身）和以 `-` 开头的选项，取第一个非选项参数的文件名，例如 `python -u /data/wsc/train_isaac.py --cfg x` 显示为 `python · train_isaac.py`；`python -c ...` 显示 `-c` 之后代码的前 24 个字符。没有可用参数时（例如没有 cmdline 的内核线程）只显示进程名。
+- **限制**：命令行最长为 300 字符；`/proc/<pid>/cmdline` 不可读或为空时只是不显示标签，不影响该行和整次采样。
+
+![带进程短标签的 detail](docs/screenshots/detail.png)
+
 ## 环境要求
 
 - Windows 10/11 x64，WebView2 运行时（Windows 11 与较新的 Windows 10 自带）。
@@ -70,7 +81,7 @@
 
 从 [Releases](https://github.com/SencWang/sysmon-widget/releases) 下载 NSIS 安装包或 MSI 直接安装。程序启动后驻留托盘：关闭窗口只是隐藏，点击托盘图标可重新显示。
 
-每次推送到 `main` 都会自动构建安装包并作为 workflow 产物提供（**Actions → build → `sysmon-widget-windows`**）；推送 `v0.2.2` 这类 tag 会构建同样的产物并生成一个草稿 Release。
+每次推送到 `main` 都会自动构建安装包并作为 workflow 产物提供（**Actions → build → `sysmon-widget-windows`**）；推送 `v0.2.3` 这类 tag 会构建同样的产物并生成一个草稿 Release。
 
 从源码构建（Node 20+、Rust stable + MSVC 工具链）：
 

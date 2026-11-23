@@ -69,6 +69,9 @@ pub struct ProcessInfo {
     /// 进程级显存占用（字节）；驱动/主机不支持时为 None
     #[serde(default)]
     pub gpu_mem: Option<u64>,
+    /// 完整命令行（含参数，最长 [`CMD_MAX_CHARS`] 字符）；旧快照缺字段或采集失败时为 None
+    #[serde(default)]
+    pub cmd: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -146,6 +149,30 @@ pub fn now_ms() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_millis() as i64,
         Err(_) => 0,
+    }
+}
+
+/// 命令行最大长度（字符）。远程脚本用 `cut -c1-300`，这里做同样的兜底。
+pub const CMD_MAX_CHARS: usize = 300;
+
+/// 规范化命令行：去掉首尾空白，空值转为 None，超长按字符截断到 300。
+pub fn clean_cmd(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(CMD_MAX_CHARS).collect())
+}
+
+/// 按 pid 把命令行合并进进程表（本机与远程共用；含 GPU 并集补入的行）。
+pub fn apply_process_cmds(
+    processes: &mut [ProcessInfo],
+    cmds: &std::collections::HashMap<u32, String>,
+) {
+    for process in processes.iter_mut() {
+        if let Some(cmd) = cmds.get(&process.pid) {
+            process.cmd = Some(cmd.clone());
+        }
     }
 }
 
@@ -227,6 +254,7 @@ mod tests {
                 mem: 2,
                 gpu_util: None,
                 gpu_mem: None,
+                cmd: Some("python -u /data/wsc/train.py".into()),
             }],
             error: None,
             gpu_proc_supported: false,
@@ -238,6 +266,7 @@ mod tests {
         assert!(json.contains("\"kind\":\"local\""));
         assert!(json.contains("\"gpuUtil\""));
         assert!(json.contains("\"gpuProcSupported\""));
+        assert!(json.contains("\"cmd\":\"python -u /data/wsc/train.py\""));
     }
 
     #[test]
@@ -259,7 +288,52 @@ mod tests {
         assert_eq!(snap.processes.len(), 1);
         assert_eq!(snap.processes[0].gpu_util, None);
         assert_eq!(snap.processes[0].gpu_mem, None);
+        assert_eq!(snap.processes[0].cmd, None);
         assert!(!snap.gpu_proc_supported);
+    }
+
+    #[test]
+    fn clean_cmd_trims_and_caps_at_300_chars() {
+        assert_eq!(clean_cmd("   "), None);
+        assert_eq!(clean_cmd("\t\n"), None);
+        assert_eq!(clean_cmd("  python -u x.py  "), Some("python -u x.py".into()));
+        // 300 个字符原样保留，301 个字符截到 300（按字符，不切坏中文）
+        let exact = "中".repeat(CMD_MAX_CHARS);
+        assert_eq!(clean_cmd(&exact).unwrap().chars().count(), CMD_MAX_CHARS);
+        let long = format!("python {}/x.py", "a".repeat(CMD_MAX_CHARS));
+        let cut = clean_cmd(&long).unwrap();
+        assert_eq!(cut.chars().count(), CMD_MAX_CHARS);
+    }
+
+    #[test]
+    fn apply_process_cmds_merges_existing_and_gpu_union_rows() {
+        let mut processes = vec![
+            ProcessInfo {
+                pid: 1,
+                name: "python".into(),
+                cpu: 10.0,
+                mem: 0,
+                gpu_util: None,
+                gpu_mem: None,
+                cmd: None,
+            },
+            ProcessInfo {
+                pid: 2,
+                name: "python".into(),
+                cpu: 0.0,
+                mem: 0,
+                gpu_util: Some(5.0),
+                gpu_mem: Some(1024),
+                cmd: None,
+            },
+        ];
+        let cmds = std::collections::HashMap::from([
+            (1u32, "python train.py".to_string()),
+            (2u32, "python eval.py".to_string()),
+        ]);
+        apply_process_cmds(&mut processes, &cmds);
+        assert_eq!(processes[0].cmd.as_deref(), Some("python train.py"));
+        assert_eq!(processes[1].cmd.as_deref(), Some("python eval.py"));
     }
 
     #[test]

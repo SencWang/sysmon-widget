@@ -4,6 +4,7 @@
 //! - 脚本通过 stdin 传给 `ssh <alias> sh -s`，不写临时文件、不拼命令行字符串。
 //! - 整体超时 8 秒（连接 5 秒 + 采集约 1.2 秒），超时直接 kill。
 //! - 输出行以 `#` 开头自描述，Rust 侧解析；没有 `#END` 视为连接被截断。
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::collector::{hidden_command, parse_gpu_line};
 use crate::gpu_proc::{merge_gpu_procs, GpuProc};
-use crate::model::{GpuInfo, ProcessInfo, Snapshot};
+use crate::model::{apply_process_cmds, clean_cmd, GpuInfo, ProcessInfo, Snapshot};
 
 /// 连接超时（秒），与脚本超时配合。
 pub const CONNECT_TIMEOUT_SECS: u64 = 5;
@@ -40,6 +41,17 @@ echo "$top_out" | awk '
   /^[[:space:]]*PID[[:space:]]/ { n++; next }
   n == 2 && NF >= 12 { cmd=""; for(i=12;i<=NF;i++) cmd = cmd (i>12?" ":"") $i; printf "#PROC %s %s %s %s\n", $1, $9, $10, cmd }
 '
+# 同名进程区分：候选 pid = CPU 前 20 ∪ GPU 进程，逐个读 /proc/<pid>/cmdline。
+# 与上面的 top/nvidia-smi 共享同一次 ssh 往返，不额外增加连接。
+pids=$(printf '%s\n%s\n' \
+  "$(ps -eo pid=,pcpu= --sort=-pcpu 2>/dev/null | head -n 20 | awk '{print $1}')" \
+  "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')" \
+  | sort -u | head -n 40)
+for p in $pids; do
+  [ -r "/proc/$p/cmdline" ] || continue
+  cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | cut -c1-300)
+  [ -n "$cmd" ] && printf '#PROCCMD %s %s\n' "$p" "$cmd"
+done
 echo "#END"
 "##;
 
@@ -272,6 +284,7 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
     let mut gpu_procs: Vec<GpuProc> = Vec::new();
     let mut gpu_apps: Vec<(u32, u64)> = Vec::new();
     let mut raw_procs: Vec<(u32, f64, f64, String)> = Vec::new();
+    let mut proc_cmds: HashMap<u32, String> = HashMap::new();
     let mut ended = false;
 
     for raw in stdout.lines() {
@@ -330,6 +343,18 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
             if mib.is_finite() && mib >= 0.0 {
                 gpu_apps.push((pid, (mib * 1024.0 * 1024.0) as u64));
             }
+        } else if let Some(rest) = line.strip_prefix("#PROCCMD ") {
+            // 前两个字段是 pid 与命令行开头，其余全部属于命令行（可含空格/中文）。
+            let mut parts = rest.splitn(2, ' ');
+            let (Some(pid_text), Some(cmd_text)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let Ok(pid) = pid_text.parse::<u32>() else {
+                continue;
+            };
+            if let Some(cmd) = clean_cmd(cmd_text) {
+                proc_cmds.insert(pid, cmd);
+            }
         } else if let Some(rest) = line.strip_prefix("#PROC ") {
             let parts: Vec<&str> = rest.splitn(4, ' ').collect();
             if parts.len() < 4 {
@@ -368,6 +393,7 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
             mem: (mem_pct.max(0.0) * mem_total_kb as f64 * 1024.0 / 100.0) as u64,
             gpu_util: None,
             gpu_mem: None,
+            cmd: None,
         })
         .collect();
     let gpu_total_bytes: Vec<u64> = gpus.iter().map(|gpu| gpu.mem_total).collect();
@@ -388,6 +414,8 @@ pub fn parse_remote_output(stdout: &str, top_n: usize) -> Result<RemoteSample, S
         &gpu_total_bytes,
         top_n.max(1),
     );
+    // #PROCCMD 按 pid 合并：既有 Top 进程与 #GPUMEM 并集补入的进程都能带上命令行。
+    apply_process_cmds(&mut merged.processes, &proc_cmds);
     let processes = merged.processes;
     let gpu_proc_supported = merged.gpu_proc_supported;
 
@@ -570,7 +598,7 @@ pub fn debug_collect(alias: &str) -> (bool, String) {
             }
             for proc_ in &sample.processes {
                 lines.push(format!(
-                    "  PROC pid={} cpu={:.1}% mem={:.1} MiB gpu={} gpu_mem={} MiB name={}",
+                    "  PROC pid={} cpu={:.1}% mem={:.1} MiB gpu={} gpu_mem={} MiB name={} cmd={}",
                     proc_.pid,
                     proc_.cpu,
                     proc_.mem as f64 / 1024.0 / 1024.0,
@@ -580,7 +608,8 @@ pub fn debug_collect(alias: &str) -> (bool, String) {
                     proc_.gpu_mem
                         .map(|v| format!("{:.0}", v as f64 / 1024.0 / 1024.0))
                         .unwrap_or_else(|| "--".into()),
-                    proc_.name
+                    proc_.name,
+                    proc_.cmd.as_deref().unwrap_or("-")
                 ));
             }
             lines.push(format!(
@@ -778,5 +807,65 @@ Match host foo
         let history = crate::collector::build_history(&queue);
         assert!((history.gpu[0] - 10.0).abs() < 1e-6);
         assert!((history.vram[0] - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_proccmd_with_path_spaces_empty_values_and_truncation() {
+        let long = "a".repeat(400);
+        let output = format!(
+            "\
+#CORES 8
+#STAT cpu  100 0 100 800 0 0 0 0 0 0
+#STAT cpu  120 0 110 850 0 0 0 0 0 0
+#MEM 1000 500
+#PROC 1 10.0 1.0 python
+#PROC 2 9.0 1.0 python
+#PROC 3 1.0 0.1 python
+#PROCCMD 1 python -u /data/my code/train_isaac.py --cfg x
+#PROCCMD 2\x20\x20\x20
+#PROCCMD 3 {long}
+#PROCCMD broken
+#END
+"
+        );
+        let sample = parse_remote_output(&output, 10).unwrap();
+        let p1 = sample.processes.iter().find(|p| p.pid == 1).unwrap();
+        // 路径中的空格完整保留，不按空格截断命令行
+        assert_eq!(
+            p1.cmd.as_deref(),
+            Some("python -u /data/my code/train_isaac.py --cfg x")
+        );
+        // 空命令行不写入
+        let p2 = sample.processes.iter().find(|p| p.pid == 2).unwrap();
+        assert_eq!(p2.cmd, None);
+        // 超长命令行按字符截断到 300
+        let p3 = sample.processes.iter().find(|p| p.pid == 3).unwrap();
+        assert_eq!(p3.cmd.as_ref().unwrap().chars().count(), 300);
+    }
+
+    #[test]
+    fn proccmd_merges_into_existing_and_gpu_union_processes() {
+        let output = "\
+#CORES 8
+#STAT cpu  100 0 100 800 0 0 0 0 0 0
+#STAT cpu  120 0 110 850 0 0 0 0 0 0
+#MEM 1000 500
+#GPUPROC 999 5 2
+#GPUMEM 999, 4096
+#PROC 1 10.0 1.0 python
+#PROCCMD 1 python -u /data/wsc/train.py
+#PROCCMD 999 python /data/wsc/eval.py --split test
+#END
+";
+        let sample = parse_remote_output(output, 10).unwrap();
+        let existing = sample.processes.iter().find(|p| p.pid == 1).unwrap();
+        assert_eq!(existing.cmd.as_deref(), Some("python -u /data/wsc/train.py"));
+        // 999 只出现在 GPU 显存数据里，被并集补进进程表，同时带上 #PROCCMD
+        let union = sample.processes.iter().find(|p| p.pid == 999).unwrap();
+        assert_eq!(union.gpu_mem, Some(4096 * 1024 * 1024));
+        assert_eq!(
+            union.cmd.as_deref(),
+            Some("python /data/wsc/eval.py --split test")
+        );
     }
 }

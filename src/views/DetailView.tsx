@@ -211,6 +211,7 @@ export function DetailView({
             onSort={onSort}
             memTotal={memTotal}
             gpuProcSupported={snapshot?.gpuProcSupported}
+            limit={Math.max(config?.topN ?? 10, 10)}
             note={
               isRemote
                 ? "远程 Top10：CPU% 为 top -bn2 第二次采样的瞬时值（多核可超过 100%）"

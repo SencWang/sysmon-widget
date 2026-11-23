@@ -1,11 +1,12 @@
 //! 采集层：sysinfo 取 CPU/内存/进程，nvidia-smi 子进程取 GPU。
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 
 use sysinfo::{ProcessesToUpdate, System};
 
 use crate::model::{
-    percent, CpuInfo, GpuInfo, HistoryPayload, HostInfo, MemInfo, ProcessInfo, Snapshot,
+    apply_process_cmds, clean_cmd, percent, CpuInfo, GpuInfo, HistoryPayload, HostInfo, MemInfo,
+    ProcessInfo, Snapshot,
 };
 
 /// nvidia-smi 查询参数（不拼接字符串，避免 cmd /c）。
@@ -229,16 +230,24 @@ impl Collector {
             total: sys.total_memory(),
         };
 
+        let mut cmds: HashMap<u32, String> = HashMap::new();
         let mut processes: Vec<ProcessInfo> = sys
             .processes()
             .iter()
-            .map(|(pid, proc_)| ProcessInfo {
-                pid: pid.as_u32(),
-                name: proc_.name().to_string_lossy().to_string(),
-                cpu: proc_.cpu_usage() as f64,
-                mem: proc_.memory(),
-                gpu_util: None,
-                gpu_mem: None,
+            .map(|(pid, proc_)| {
+                let cmd = process_cmd(proc_);
+                if let Some(text) = &cmd {
+                    cmds.insert(pid.as_u32(), text.clone());
+                }
+                ProcessInfo {
+                    pid: pid.as_u32(),
+                    name: proc_.name().to_string_lossy().to_string(),
+                    cpu: proc_.cpu_usage() as f64,
+                    mem: proc_.memory(),
+                    gpu_util: None,
+                    gpu_mem: None,
+                    cmd,
+                }
             })
             .collect();
         processes.sort_by(|a, b| {
@@ -281,8 +290,23 @@ impl Collector {
             &gpu_total_bytes,
             top_n.max(1),
         );
+        // GPU 并集补进来的进程也要尽量带上命令行。
+        apply_process_cmds(&mut snapshot.processes, &cmds);
         snapshot
     }
+}
+
+/// 本机命令行：`sysinfo::Process::cmd()` 的参数用空格拼接，失败/为空时 None。
+fn process_cmd(process: &sysinfo::Process) -> Option<String> {
+    let parts: Vec<String> = process
+        .cmd()
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    clean_cmd(&parts.join(" "))
 }
 
 /// 由快照序列生成历史曲线；CPU/内存/GPU/显存均换算成 0-100 百分比。

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { clamp, gib, shortName } from "../lib/format";
+import { clamp, cmdTag, gib, shortName } from "../lib/format";
 import { COLORS, type ProcessInfo, type SortKey } from "../types";
 
 type Props = {
@@ -32,6 +32,7 @@ export function ProcessTable({
   memTotal,
   note,
   gpuProcSupported,
+  limit = 10,
 }: Props) {
   const [descending, setDescending] = useState(true);
 
@@ -46,8 +47,8 @@ export function ProcessTable({
       if (right == null) return -1;
       return descending ? right - left : left - right;
     });
-    return copy.slice(0, 10);
-  }, [processes, sortKey, descending]);
+    return copy.slice(0, Math.max(limit, 1));
+  }, [processes, sortKey, descending, limit]);
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
@@ -105,82 +106,86 @@ export function ProcessTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((p) => (
-              <tr key={`${p.pid}-${p.name}`}>
-                <td className="col-pid mono dim">{p.pid}</td>
-                <td className="col-name" title={p.name}>
-                  {shortName(p.name, 26)}
-                </td>
-                <td className="col-num">
-                  <div className="cell">
-                    <span className="mono">{p.cpu.toFixed(1)}%</span>
-                    <div className="mini-track">
-                      <div
-                        className="mini-fill"
-                        style={{
-                          width: `${clamp((p.cpu / maxCpu) * 100, 1, 100)}%`,
-                          background: COLORS.cpu,
-                        }}
-                      />
-                    </div>
-                  </div>
-                </td>
-                <td className="col-num">
-                  <div className="cell">
-                    <span className="mono">{gib(p.mem)} GiB</span>
-                    <div className="mini-track">
-                      <div
-                        className="mini-fill"
-                        style={{
-                          width: `${clamp((p.mem / memBase) * 100, 1, 100)}%`,
-                          background: COLORS.mem,
-                        }}
-                      />
-                    </div>
-                  </div>
-                </td>
-                <td className="col-gpu">
-                  {p.gpuUtil == null ? (
-                    <span className="dim" title={NO_GPU_TITLE}>
-                      —
-                    </span>
-                  ) : (
+            {rows.map((p) => {
+              const tag = cmdTag(p.cmd);
+              return (
+                <tr key={`${p.pid}-${p.name}`}>
+                  <td className="col-pid mono dim">{p.pid}</td>
+                  <td className="col-name" title={p.cmd?.trim() || p.name}>
+                    <span className="proc-name">{shortName(p.name, 26)}</span>
+                    {tag ? <span className="proc-tag"> · {tag}</span> : null}
+                  </td>
+                  <td className="col-num">
                     <div className="cell">
-                      <span className="mono">{Math.round(p.gpuUtil)}%</span>
+                      <span className="mono">{p.cpu.toFixed(1)}%</span>
                       <div className="mini-track">
                         <div
                           className="mini-fill"
                           style={{
-                            width: `${clamp(p.gpuUtil, 1, 100)}%`,
-                            background: COLORS.gpu,
+                            width: `${clamp((p.cpu / maxCpu) * 100, 1, 100)}%`,
+                            background: COLORS.cpu,
                           }}
                         />
                       </div>
                     </div>
-                  )}
-                </td>
-                <td className="col-gpu">
-                  {p.gpuMem == null ? (
-                    <span className="dim" title={NO_GPU_TITLE}>
-                      —
-                    </span>
-                  ) : (
+                  </td>
+                  <td className="col-num">
                     <div className="cell">
-                      <span className="mono">{gib(p.gpuMem)} GiB</span>
+                      <span className="mono">{gib(p.mem)} GiB</span>
                       <div className="mini-track">
                         <div
                           className="mini-fill"
                           style={{
-                            width: `${clamp((p.gpuMem / gpuMemBase) * 100, 1, 100)}%`,
-                            background: COLORS.gpu,
+                            width: `${clamp((p.mem / memBase) * 100, 1, 100)}%`,
+                            background: COLORS.mem,
                           }}
                         />
                       </div>
                     </div>
-                  )}
-                </td>
-              </tr>
-            ))}
+                  </td>
+                  <td className="col-gpu">
+                    {p.gpuUtil == null ? (
+                      <span className="dim" title={NO_GPU_TITLE}>
+                        —
+                      </span>
+                    ) : (
+                      <div className="cell">
+                        <span className="mono">{Math.round(p.gpuUtil)}%</span>
+                        <div className="mini-track">
+                          <div
+                            className="mini-fill"
+                            style={{
+                              width: `${clamp(p.gpuUtil, 1, 100)}%`,
+                              background: COLORS.gpu,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </td>
+                  <td className="col-gpu">
+                    {p.gpuMem == null ? (
+                      <span className="dim" title={NO_GPU_TITLE}>
+                        —
+                      </span>
+                    ) : (
+                      <div className="cell">
+                        <span className="mono">{gib(p.gpuMem)} GiB</span>
+                        <div className="mini-track">
+                          <div
+                            className="mini-fill"
+                            style={{
+                              width: `${clamp((p.gpuMem / gpuMemBase) * 100, 1, 100)}%`,
+                              background: COLORS.gpu,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
             {rows.length === 0 ? (
               <tr>
                 <td className="empty dim" colSpan={6}>
